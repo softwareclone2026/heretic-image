@@ -4,35 +4,94 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
+    paths:
+      - "Dockerfile"
+      - ".github/workflows/build.yml"
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost
-          sudo apt-get clean
+          sudo rm -rf /usr/share/dotnet \
+                      /usr/local/lib/android \
+                      /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL \
+                      /usr/local/share/boost \
+                      /usr/share/swift \
+                      /opt/az \
+                      /usr/local/.ghcup \
+                      /usr/lib/jvm \
+                      /usr/local/share/powershell \
+                      /usr/share/miniconda
+          sudo docker image prune -af || true
           df -h /
+
+      - name: Detect Docker Hub credentials
+        id: dh
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -n "$DOCKERHUB_USERNAME" ] && [ -n "$DOCKERHUB_TOKEN" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "username=$DOCKERHUB_USERNAME" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "Docker Hub の Secrets が未設定のため、GHCR にのみ push します。"
+          fi
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Log in to Docker Hub
+        if: steps.dh.outputs.enabled == 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: tags
+        env:
+          DH_ENABLED: ${{ steps.dh.outputs.enabled }}
+          DH_USER: ${{ steps.dh.outputs.username }}
+        run: |
+          OWNER_LC=$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+          SHORT_SHA=${GITHUB_SHA:0:7}
+          {
+            echo "value<<__TAGS__"
+            echo "ghcr.io/$OWNER_LC/heretic:latest"
+            echo "ghcr.io/$OWNER_LC/heretic:$SHORT_SHA"
+            if [ "$DH_ENABLED" = "true" ]; then
+              echo "docker.io/$DH_USER/heretic:latest"
+              echo "docker.io/$DH_USER/heretic:runpod-1"
+            fi
+            echo "__TAGS__"
+          } >> "$GITHUB_OUTPUT"
+          echo "--- push 先 ---"
+          cat "$GITHUB_OUTPUT"
 
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/heretic:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/heretic:runpod-1
+          tags: ${{ steps.tags.outputs.value }}
+          cache-from: type=gha
+          cache-to: type=gha
